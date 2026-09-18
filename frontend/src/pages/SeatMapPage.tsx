@@ -19,7 +19,11 @@ export default function SeatMapPage() {
 
   useEffect(() => {
     if (sid === "") return;
-    api<MapOut>(`/seatmap/${sid}`).then(setMap);
+    const load = () => api<MapOut>(`/seatmap/${sid}`).then(setMap).catch(() => {});
+    load();
+    // 轮询出图：到期释放后座位自动腾空，续期后的记录按新时刻仍占用
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
   }, [sid]);
 
   const gridStyle = useMemo(

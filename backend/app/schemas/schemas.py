@@ -29,6 +29,10 @@ class HoldOut(BaseModel):
     end_col: int
     party_size: int
     status: str
+    created_at: datetime
+    expires_at: datetime | None
+    renewals_used: int
+    renewals_left: int
     model_config = {"from_attributes": True}
 
 

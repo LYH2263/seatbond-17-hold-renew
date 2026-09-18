@@ -19,26 +19,42 @@ type Hold = {
   end_col: number;
   party_size: number;
   status: string;
+  expires_at: string | null;
+  renewals_left: number;
 };
+
+function remain(iso: string | null, tick: number): string {
+  void tick;
+  if (!iso) return "";
+  const d = new Date(iso.endsWith("Z") ? iso : `${iso}Z`).getTime();
+  const secs = Math.max(0, Math.round((d - Date.now()) / 1000));
+  if (secs <= 0) return "已到点";
+  return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+}
 
 export default function Layout() {
   const loc = useLocation();
   const isSeatHero = loc.pathname === "/seatmap" || loc.pathname === "/";
   const [holds, setHolds] = useState<Hold[]>([]);
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
-    api<Hold[]>("/holds")
-      .then(setHolds)
-      .catch(() => setHolds([]));
-    const t = setInterval(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    const load = () =>
       api<Hold[]>("/holds")
         .then(setHolds)
         .catch(() => {});
-    }, 8000);
+    load();
+    const t = setInterval(load, 8000);
     return () => clearInterval(t);
   }, [loc.pathname]);
 
-  const active = holds.filter((h) => h.status === "held" || h.status === "active").slice(0, 6);
+  // 只有持有中（未到期）的记录进入当前锁座；列表接口已顺带跑过超时扫描
+  const active = holds.filter((h) => h.status === "held").slice(0, 6);
   const recent = holds.slice(0, 8);
 
   return (
@@ -85,7 +101,8 @@ export default function Layout() {
               <div className="stub-meta">
                 R{h.row} · C{h.start_col}-{h.end_col}
               </div>
-              <div className="stub-meta">{h.party_size} 人 · {h.status}</div>
+              <div className="stub-meta">{h.party_size} 人 · 剩余 {remain(h.expires_at, tick)}</div>
+              <div className="stub-meta">可续 {h.renewals_left} 次</div>
             </div>
           ))}
         </div>
