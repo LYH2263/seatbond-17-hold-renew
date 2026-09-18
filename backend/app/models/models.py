@@ -1,9 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+# Hold lifecycle statuses: held -> released (timeout sweep) | cancelled (user)
+HOLD_HELD = "held"
+HOLD_RELEASED = "released"
+HOLD_CANCELLED = "cancelled"
+HOLD_STATUSES = (HOLD_HELD, HOLD_RELEASED, HOLD_CANCELLED)
 
 
 class Hall(Base):
@@ -28,7 +34,6 @@ class Showtime(Base):
 
 class SeatHold(Base):
     __tablename__ = "seat_holds"
-    __table_args__ = (UniqueConstraint("showtime_id", "row", "start_col", "end_col", name="uq_hold_span"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     showtime_id: Mapped[int] = mapped_column(ForeignKey("showtimes.id"))
     order_code: Mapped[str] = mapped_column(String(40))
@@ -36,8 +41,10 @@ class SeatHold(Base):
     start_col: Mapped[int] = mapped_column(Integer)
     end_col: Mapped[int] = mapped_column(Integer)
     party_size: Mapped[int] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(20), default="held")
+    status: Mapped[str] = mapped_column(String(20), default=HOLD_HELD)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    renew_count: Mapped[int] = mapped_column(Integer, default=0)
     showtime: Mapped[Showtime] = relationship(back_populates="holds")
 
 

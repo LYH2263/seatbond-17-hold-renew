@@ -1,11 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
-from app.models.models import ConflictLog, Hall, SeatHold, Showtime
+from app.models.models import HOLD_HELD, HOLD_STATUSES, ConflictLog, Hall, SeatHold, Showtime
 from app.schemas.schemas import (
     ConflictOut,
     HallOut,
@@ -14,7 +15,9 @@ from app.schemas.schemas import (
     SeatMapCell,
     SeatMapOut,
     ShowtimeOut,
+    SweepOut,
 )
+from app.services import hold_service
 from app.services.bond_engine import (
     HoldSpan,
     SeatCell,
@@ -22,6 +25,7 @@ from app.services.bond_engine import (
     find_bond_across_rows,
     find_contiguous_block,
 )
+from app.services.hold_service import HoldStateError
 
 api_router = APIRouter()
 
@@ -34,6 +38,32 @@ def _aisles(hall: Hall) -> list[int]:
 
 def _hall_out(h: Hall) -> HallOut:
     return HallOut(id=h.id, name=h.name, rows=h.rows, cols=h.cols, aisle_cols=_aisles(h))
+
+
+def _hold_out(h: SeatHold) -> HoldOut:
+    return HoldOut(
+        id=h.id,
+        showtime_id=h.showtime_id,
+        order_code=h.order_code,
+        row=h.row,
+        start_col=h.start_col,
+        end_col=h.end_col,
+        party_size=h.party_size,
+        status=h.status,
+        expires_at=h.expires_at,
+        renew_count=h.renew_count,
+        renewals_remaining=hold_service.renewals_remaining(h),
+        created_at=h.created_at,
+    )
+
+
+def _held_holds(db: Session, showtime_id: int) -> list[SeatHold]:
+    """Live holds for a showtime: anything not held no longer occupies seats."""
+    return db.scalars(
+        select(SeatHold).where(
+            SeatHold.showtime_id == showtime_id, SeatHold.status == HOLD_HELD
+        )
+    ).all()
 
 
 @api_router.get("/health")
@@ -72,7 +102,8 @@ def seatmap(showtime_id: int, db: Session = Depends(get_db)):
     hall = db.get(Hall, st.hall_id)
     assert hall
     aisles = set(_aisles(hall))
-    holds = db.scalars(select(SeatHold).where(SeatHold.showtime_id == showtime_id)).all()
+    hold_service.sweep_expired(db)
+    holds = _held_holds(db, showtime_id)
     occupied: set[tuple[int, int]] = set()
     for h in holds:
         for c in range(h.start_col, h.end_col + 1):
@@ -101,8 +132,54 @@ def seatmap(showtime_id: int, db: Session = Depends(get_db)):
 
 
 @api_router.get("/holds", response_model=list[HoldOut])
-def list_holds(db: Session = Depends(get_db)):
-    return db.scalars(select(SeatHold).order_by(SeatHold.id.desc())).all()
+def list_holds(
+    status: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    if status is not None and status not in HOLD_STATUSES:
+        raise HTTPException(400, f"未知状态：{status}（可选 {', '.join(HOLD_STATUSES)}）")
+    hold_service.sweep_expired(db)
+    stmt = select(SeatHold).order_by(SeatHold.id.desc())
+    if status is not None:
+        stmt = stmt.where(SeatHold.status == status)
+    return [_hold_out(h) for h in db.scalars(stmt).all()]
+
+
+@api_router.post("/holds/sweep", response_model=SweepOut)
+def sweep_holds(db: Session = Depends(get_db)):
+    """Timeout scan: held holds past expires_at become released and free their seats."""
+    released = hold_service.sweep_expired(db)
+    return SweepOut(released=len(released), released_ids=[h.id for h in released])
+
+
+@api_router.post("/holds/{hold_id}/renew", response_model=HoldOut)
+def renew_hold(hold_id: int, db: Session = Depends(get_db)):
+    hold = db.get(SeatHold, hold_id)
+    if not hold:
+        raise HTTPException(404, "持座不存在")
+    hold_service.sweep_expired(db)  # an already-expired hold must read as released here
+    try:
+        hold_service.renew_hold(hold)
+    except HoldStateError as e:
+        raise HTTPException(409, str(e))
+    db.commit()
+    db.refresh(hold)
+    return _hold_out(hold)
+
+
+@api_router.post("/holds/{hold_id}/cancel", response_model=HoldOut)
+def cancel_hold(hold_id: int, db: Session = Depends(get_db)):
+    hold = db.get(SeatHold, hold_id)
+    if not hold:
+        raise HTTPException(404, "持座不存在")
+    hold_service.sweep_expired(db)
+    try:
+        hold_service.cancel_hold(hold)
+    except HoldStateError as e:
+        raise HTTPException(409, str(e))
+    db.commit()
+    db.refresh(hold)
+    return _hold_out(hold)
 
 
 @api_router.get("/conflicts", response_model=list[ConflictOut])
@@ -118,7 +195,8 @@ def create_hold(body: HoldRequest, db: Session = Depends(get_db)):
     hall = db.get(Hall, st.hall_id)
     assert hall
     aisles = set(_aisles(hall))
-    existing = db.scalars(select(SeatHold).where(SeatHold.showtime_id == body.showtime_id)).all()
+    hold_service.sweep_expired(db)  # released seats are bookable again
+    existing = _held_holds(db, body.showtime_id)
     holds = [HoldSpan(row=h.row, start_col=h.start_col, end_col=h.end_col) for h in existing]
     seats_by_row: dict[int, list[SeatCell]] = {}
     for r in range(1, hall.rows + 1):
@@ -164,8 +242,9 @@ def create_hold(body: HoldRequest, db: Session = Depends(get_db)):
         start_col=block.start_col,
         end_col=block.end_col,
         party_size=body.party_size,
+        expires_at=hold_service.utcnow() + timedelta(minutes=settings.hold_ttl_minutes),
     )
     db.add(hold)
     db.commit()
     db.refresh(hold)
-    return hold
+    return _hold_out(hold)

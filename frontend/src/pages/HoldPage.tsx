@@ -9,6 +9,8 @@ type Hold = {
   start_col: number;
   end_col: number;
   party_size: number;
+  expires_at: string;
+  renewals_remaining: number;
 };
 
 export default function HoldPage() {
@@ -79,6 +81,10 @@ export default function HoldPage() {
       {last && (
         <p className="mono">
           订单 {last.order_code} · {last.party_size} 人 · R{last.row} C{last.start_col}-{last.end_col}
+          {" · 到期 "}
+          {new Date(last.expires_at).toLocaleString("zh-CN", { hour12: false })}
+          {" · 可续期 "}
+          {last.renewals_remaining} 次
         </p>
       )}
     </>

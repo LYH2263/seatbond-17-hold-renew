@@ -29,6 +29,10 @@ class HoldOut(BaseModel):
     end_col: int
     party_size: int
     status: str
+    expires_at: datetime
+    renew_count: int
+    renewals_remaining: int
+    created_at: datetime
     model_config = {"from_attributes": True}
 
 
@@ -36,6 +40,11 @@ class HoldRequest(BaseModel):
     showtime_id: int
     party_size: int = Field(ge=1, le=12)
     preferred_row: int | None = None
+
+
+class SweepOut(BaseModel):
+    released: int
+    released_ids: list[int]
 
 
 class ConflictOut(BaseModel):
